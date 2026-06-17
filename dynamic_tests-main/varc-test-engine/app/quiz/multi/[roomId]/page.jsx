@@ -144,11 +144,11 @@ function MultiRoomEngine({ roomId }) {
 
     return () => {
       isMounted = false;
-      channel.unsubscribe();
+      supabase.removeChannel(channel);
     };
   }, [roomId, myUuid, myAvatarName, quizData, isHost, quizConfig]);
 
-  // Handle Live Classroom Microphone Request for players upon entering 'playing' state
+  // Handle Live Classroom Microphone Request for players
   useEffect(() => {
     if (roomState === 'playing' && peerConfig?.enableMic && !isHost) {
       navigator.mediaDevices.getUserMedia({ audio: true })
@@ -165,8 +165,8 @@ function MultiRoomEngine({ roomId }) {
       if (!quizConfig) return;
       setIsStarting(true);
       let data = [];
-      if (quizConfig.mode === 'random' || quizConfig.tests.length === 0) {
-          data = await generateRandomQuiz(quizConfig.count);
+      if (quizConfig.mode === 'random' || !quizConfig.tests || quizConfig.tests.length === 0) {
+          data = await generateRandomQuiz(quizConfig.count || 5);
       } else {
           for (const t of quizConfig.tests) {
               const tData = await getTestData(t.filename);
@@ -185,9 +185,10 @@ function MultiRoomEngine({ roomId }) {
   // 3. Global Directory Broadcasting (Keeps the room listed in the lobby for others)
   useEffect(() => {
     let isMounted = true;
+    let globalChannel = null;
 
     if (isHost && roomState === 'waiting') {
-      const globalChannel = supabase.channel('global-directory');
+      globalChannel = supabase.channel('global-directory');
       
       globalChannel.subscribe(async (status) => {
         if (status === 'SUBSCRIBED' && isMounted) {
@@ -208,12 +209,9 @@ function MultiRoomEngine({ roomId }) {
 
     return () => {
       isMounted = false;
-      // CRITICAL ARCHITECTURE FIX: 
-      // We ONLY untrack our room presence from the lobby so it disappears from the list.
-      // We NEVER call unsubscribe() or removeChannel() here, preserving the shared 
-      // socket connection for the rest of the app.
-      const globalChannel = supabase.channel('global-directory');
-      globalChannel.untrack();
+      if (globalChannel) {
+        supabase.removeChannel(globalChannel);
+      }
     };
   }, [isHost, roomState, roomId]);
 
@@ -286,7 +284,7 @@ function MultiRoomEngine({ roomId }) {
                  <div className="flex gap-4 mb-6">
                    <div className="flex-1 bg-white border border-slate-200 rounded-lg p-3 shadow-sm">
                      <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Mode</div>
-                     <div className="text-sm font-bold text-slate-700 capitalize">{quizConfig.mode} ({quizConfig.mode === 'random' ? quizConfig.count : quizConfig.tests.length} items)</div>
+                     <div className="text-sm font-bold text-slate-700 capitalize">{quizConfig.mode} ({quizConfig.mode === 'random' ? quizConfig.count : (quizConfig.tests?.length || 0)} items)</div>
                    </div>
                    <div className="flex-1 bg-white border border-slate-200 rounded-lg p-3 shadow-sm">
                      <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Live Audio</div>
