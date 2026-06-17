@@ -69,7 +69,7 @@ export default function QuizLobby() {
     setShowConfig(true);
   };
 
-  const handleLaunchServer = async () => {
+  const handleLaunchServer = () => {
     // Create an immutable code bound to their Name and IP
     const sanitizedName = hostName.trim().replace(/[^a-zA-Z0-9]/g, '');
     const sanitizedIp = ipAddress.replace(/[^a-zA-Z0-9]/g, '-');
@@ -83,21 +83,8 @@ export default function QuizLobby() {
         enableMic: enableMic
     }));
 
-    // Temporarily broadcast intent so it instantly appears in the directory for others
-    const intentChannel = supabase.channel('global-directory');
-    await intentChannel.subscribe(async (status) => {
-       if(status === 'SUBSCRIBED') {
-           await intentChannel.track({
-               isHost: true,
-               hostName: hostName.trim(),
-               ip: ipAddress,
-               roomId: roomId,
-               createdAt: new Date().toISOString()
-           });
-       }
-    });
-
-    // Send user to their room
+    // Route directly to the room. The room component itself will handle 
+    // registering its presence securely in the global directory to avoid WebSocket conflicts.
     router.push(`/quiz/multi/${roomId}`);
   };
 
