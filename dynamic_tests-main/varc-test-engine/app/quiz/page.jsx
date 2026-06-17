@@ -50,7 +50,6 @@ export default function QuizLobby() {
       const state = channel.presenceState();
       const rooms = [];
       for (const id in state) {
-        // Look for presences that have identified as hosts
         const presenceData = state[id][0];
         if (presenceData && presenceData.isHost) {
            rooms.push(presenceData);
@@ -60,7 +59,8 @@ export default function QuizLobby() {
     }).subscribe();
 
     return () => {
-       supabase.removeChannel(channel);
+       // FIX: Use unsubscribe instead of removeChannel to prevent killing the host's connection during transition
+       channel.unsubscribe();
     };
   }, []);
 
@@ -70,12 +70,10 @@ export default function QuizLobby() {
   };
 
   const handleLaunchServer = () => {
-    // Create an immutable code bound to their Name and IP
     const sanitizedName = hostName.trim().replace(/[^a-zA-Z0-9]/g, '');
     const sanitizedIp = ipAddress.replace(/[^a-zA-Z0-9]/g, '-');
     const roomId = `${sanitizedName}-${sanitizedIp}`.toUpperCase();
     
-    // Save the rich configuration to SessionStorage to be picked up by the room
     sessionStorage.setItem(`arena_config_${roomId}`, JSON.stringify({
         mode: quizMode,
         count: questionCount,
@@ -83,8 +81,6 @@ export default function QuizLobby() {
         enableMic: enableMic
     }));
 
-    // Route directly to the room. The room component itself will handle 
-    // registering its presence securely in the global directory to avoid WebSocket conflicts.
     router.push(`/quiz/multi/${roomId}`);
   };
 
@@ -92,7 +88,6 @@ export default function QuizLobby() {
     router.push(`/quiz/multi/${roomId}`);
   };
 
-  // Group tests by folder for the selector UI
   const grouped = availableTests.reduce((acc, test) => {
     if (!acc[test.folder]) acc[test.folder] = [];
     acc[test.folder].push(test);
@@ -105,11 +100,9 @@ export default function QuizLobby() {
         <Home size={18}/> Back to Home
       </Link>
       
-      {/* Host Configuration Modal */}
       {showConfig && (
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-[2rem] shadow-2xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col animate-in zoom-in-95 duration-200">
-            {/* Header */}
             <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
                <div className="flex items-center gap-3">
                   <div className="bg-indigo-100 p-2 rounded-xl text-indigo-600"><Settings size={20}/></div>
@@ -121,13 +114,10 @@ export default function QuizLobby() {
                <button onClick={() => setShowConfig(false)} className="p-2 hover:bg-slate-200 rounded-full text-slate-500 transition-colors"><X size={20}/></button>
             </div>
             
-            {/* Body */}
             <div className="flex-1 overflow-hidden flex flex-col md:flex-row">
-               {/* Left Pane: Settings */}
                <div className="w-full md:w-1/3 bg-slate-50/50 border-r border-slate-100 p-6 overflow-y-auto scrollbar-thin">
                   <h3 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-4">Core Rules</h3>
                   
-                  {/* Quiz Mode */}
                   <div className="space-y-3 mb-8">
                      <label className={`flex items-start gap-3 p-4 rounded-xl border-2 cursor-pointer transition-all ${quizMode === 'random' ? 'border-indigo-500 bg-indigo-50/50' : 'border-slate-200 hover:border-indigo-200'}`}>
                         <input type="radio" name="mode" checked={quizMode === 'random'} onChange={() => setQuizMode('random')} className="mt-1" />
@@ -146,7 +136,6 @@ export default function QuizLobby() {
                      </label>
                   </div>
 
-                  {/* Question Count (Only if random) */}
                   {quizMode === 'random' && (
                     <div className="mb-8 animate-in fade-in slide-in-from-top-2">
                        <label className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2 block">Number of Passages: {questionCount}</label>
@@ -154,7 +143,6 @@ export default function QuizLobby() {
                     </div>
                   )}
 
-                  {/* Audio Setup */}
                   <h3 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-4">Live Classroom</h3>
                   <div className="bg-white border border-slate-200 p-4 rounded-xl shadow-sm">
                      <div className="flex items-center justify-between mb-2">
@@ -171,7 +159,6 @@ export default function QuizLobby() {
                   </div>
                </div>
 
-               {/* Right Pane: Module Selector */}
                <div className={`w-full md:w-2/3 flex flex-col bg-white transition-opacity duration-300 ${quizMode === 'random' ? 'opacity-40 pointer-events-none' : 'opacity-100'}`}>
                   <div className="p-4 border-b border-slate-100">
                      <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 flex items-center gap-2">
@@ -222,7 +209,6 @@ export default function QuizLobby() {
                </div>
             </div>
 
-            {/* Footer */}
             <div className="p-4 border-t border-slate-100 bg-slate-50 flex items-center justify-between">
                <div className="text-sm font-semibold text-slate-500">
                   {quizMode === 'custom' ? (
@@ -247,7 +233,6 @@ export default function QuizLobby() {
         <div className="absolute top-0 right-0 w-96 h-96 bg-indigo-50/50 rounded-full blur-3xl -z-10 transform translate-x-1/2 -translate-y-1/2"></div>
         <div className="absolute bottom-0 left-0 w-96 h-96 bg-emerald-50/50 rounded-full blur-3xl -z-10 transform -translate-x-1/2 translate-y-1/2"></div>
         
-        {/* Left Side: Host Setup */}
         <div className="flex-1 text-left z-10 border-b lg:border-b-0 lg:border-r border-slate-200/60 pb-10 lg:pb-0 lg:pr-12">
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-indigo-100 text-indigo-600 mb-6">
             <Server size={32} />
@@ -291,7 +276,6 @@ export default function QuizLobby() {
           </div>
         </div>
 
-        {/* Right Side: Active Directory */}
         <div className="flex-[1.2] text-left z-10 flex flex-col h-full min-h-[400px]">
           <div className="flex items-center justify-between mb-8">
              <div>
