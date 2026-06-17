@@ -29,8 +29,8 @@ function MultiRoomEngine({ roomId }) {
   const channelRef = useRef(null);
 
   // Configuration passed down from the Host's Modal
-  const [quizConfig, setQuizConfig] = useState(null); // The host's original config
-  const [peerConfig, setPeerConfig] = useState(null); // The configuration received via broadcast for players
+  const [quizConfig, setQuizConfig] = useState(null); 
+  const [peerConfig, setPeerConfig] = useState(null); 
   const [isStarting, setIsStarting] = useState(false);
 
   const extractQuestionsFromRow = (row) => {
@@ -131,12 +131,19 @@ function MultiRoomEngine({ roomId }) {
     };
   }, [roomId, myUuid, myAvatarName, quizData, isHost, quizConfig]);
 
-  // Read config from sessionStorage for Host
+  // Read config from sessionStorage for Host with robust fallback
   useEffect(() => {
     if (isHost && !quizConfig) {
-      const configStr = sessionStorage.getItem(`arena_config_${roomId}`);
-      if (configStr) {
-         setQuizConfig(JSON.parse(configStr));
+      try {
+        const configStr = sessionStorage.getItem(`arena_config_${roomId}`);
+        if (configStr) {
+           setQuizConfig(JSON.parse(configStr));
+        } else {
+           // Fallback if sessionStorage is empty or dropped
+           setQuizConfig({ mode: 'random', count: 5, tests: [], enableMic: true });
+        }
+      } catch (error) {
+        setQuizConfig({ mode: 'random', count: 5, tests: [], enableMic: true });
       }
     }
   }, [isHost, roomId, quizConfig]);
@@ -146,8 +153,8 @@ function MultiRoomEngine({ roomId }) {
     if (roomState === 'playing' && peerConfig?.enableMic && !isHost) {
       navigator.mediaDevices.getUserMedia({ audio: true })
         .then(stream => {
-           // Success: Granted mic access. Stream is ready for upcoming WebRTC feature connection
            console.log("Mic access granted for live classroom.");
+           // Stream is ready for upcoming WebRTC implementation
         })
         .catch(err => {
            alert("Microphone access is required for this live classroom arena. Please enable it in your browser settings.");
