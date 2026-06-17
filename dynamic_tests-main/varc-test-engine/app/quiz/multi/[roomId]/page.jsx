@@ -17,7 +17,7 @@ function MultiRoomEngine({ roomId }) {
   
   const [isHost, setIsHost] = useState(false);
   const [quizData, setQuizData] = useState([]);
-  const [roomState, setRoomState] = useState('waiting');
+  const [roomState, setRoomState] = useState('waiting'); // 'waiting' | 'playing' | 'finished'
   const [viewState, setViewState] = useState('testing');
   
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -68,31 +68,37 @@ function MultiRoomEngine({ roomId }) {
     return { correct, totalChecked };
   };
 
-  // 1. Host Authentication
+  // 1. Fetch Room Config from Database
   useEffect(() => {
-    let isMounted = true;
-    const configStr = sessionStorage.getItem(`arena_config_${roomId}`);
-    if (configStr && isMounted) {
-      setIsHost(true);
-      try {
-        setQuizConfig(JSON.parse(configStr));
-      } catch (error) {
-        setQuizConfig({ mode: 'random', count: 5, tests: [], enableMic: true });
+    const fetchRoomDb = async () => {
+      const { data, error } = await supabase.from('active_arenas').select('*').eq('room_id', roomId).single();
+      
+      if (data) {
+        setPeerConfig(data.config);
+        
+        // Verify if we are the host using the local sessionStorage key
+        const localHostConfig = sessionStorage.getItem(`arena_config_${roomId}`);
+        if (localHostConfig) {
+           setIsHost(true);
+           setQuizConfig(data.config); // Set config for starting the game
+        }
+      } else {
+         console.warn("Room not found in DB or fetching failed.");
       }
-    }
-    return () => { isMounted = false; };
+    };
+    fetchRoomDb();
   }, [roomId]);
 
-  // 2. Realtime Synchronization
+  // 2. Realtime Synchronization for Gameplay & Presence
   useEffect(() => {
     let isMounted = true;
+    // We strictly use this channel for in-game state, NOT directory listings
     const channel = supabase.channel(`multi-${roomId}`, { config: { presence: { key: myUuid } } });
     channelRef.current = channel;
 
     channel.on('presence', { event: 'sync' }, () => {
       if (!isMounted) return;
       const state = channel.presenceState();
-
       const currentLeaderboard = [];
       Object.entries(state).forEach(([uuid, presences]) => {
         const latestPresence = presences[presences.length - 1]; 
@@ -105,7 +111,6 @@ function MultiRoomEngine({ roomId }) {
           isHost: latestPresence.isHost || false
         });
       });
-      
       currentLeaderboard.sort((a, b) => b.correct - a.correct || b.totalChecked - a.totalChecked);
       setLeaderboard(currentLeaderboard);
     });
@@ -114,14 +119,13 @@ function MultiRoomEngine({ roomId }) {
       if (!isMounted) return;
       if (payload.quizData && quizData.length === 0) {
         setQuizData(payload.quizData);
-        if (payload.config) setPeerConfig(payload.config);
         setRoomState('playing');
       }
     });
 
     channel.on('broadcast', { event: 'request_quiz' }, () => {
       if (isHost && quizData.length > 0) {
-        channel.send({ type: 'broadcast', event: 'sync_state', payload: { quizData, config: quizConfig } });
+        channel.send({ type: 'broadcast', event: 'sync_state', payload: { quizData } });
       }
     });
 
@@ -146,9 +150,9 @@ function MultiRoomEngine({ roomId }) {
       isMounted = false;
       supabase.removeChannel(channel);
     };
-  }, [roomId, myUuid, myAvatarName, quizData, isHost, quizConfig]);
+  }, [roomId, myUuid, myAvatarName, quizData, isHost]);
 
-  // Handle Live Classroom Microphone Request for players
+  // 3. Handle Live Classroom Microphone Request for players
   useEffect(() => {
     if (roomState === 'playing' && peerConfig?.enableMic && !isHost) {
       navigator.mediaDevices.getUserMedia({ audio: true })
@@ -174,46 +178,17 @@ function MultiRoomEngine({ roomId }) {
           }
       }
       setQuizData(data);
-      setPeerConfig(quizConfig);
       setRoomState('playing');
+
+      // Tell DB the room is no longer 'waiting', so it vanishes from the Lobby
+      await supabase.from('active_arenas').update({ status: 'playing' }).eq('room_id', roomId);
+
+      // Broadcast data to connected peers
       if (channelRef.current) {
-          channelRef.current.send({ type: 'broadcast', event: 'sync_state', payload: { quizData: data, config: quizConfig } });
+          channelRef.current.send({ type: 'broadcast', event: 'sync_state', payload: { quizData: data } });
       }
       setIsStarting(false);
   };
-
-  // 3. Global Directory Broadcasting (Keeps the room listed in the lobby for others)
-  useEffect(() => {
-    let isMounted = true;
-    let globalChannel = null;
-
-    if (isHost && roomState === 'waiting') {
-      globalChannel = supabase.channel('global-directory');
-      
-      globalChannel.subscribe(async (status) => {
-        if (status === 'SUBSCRIBED' && isMounted) {
-          const parts = roomId.split('-');
-          const hostName = parts[0] || 'Arena Host';
-          const ip = parts.slice(1).join('.') || 'Active Network';
-          
-          await globalChannel.track({
-            isHost: true,
-            hostName: hostName,
-            ip: ip,
-            roomId: roomId,
-            createdAt: new Date().toISOString()
-          });
-        }
-      });
-    }
-
-    return () => {
-      isMounted = false;
-      if (globalChannel) {
-        supabase.removeChannel(globalChannel);
-      }
-    };
-  }, [isHost, roomState, roomId]);
 
   const handlePersistProgress = async (newAnswers, newLocked) => {
     const stats = computeLiveStats(newAnswers || myAnswers, newLocked || myLocked, quizData);
@@ -228,9 +203,13 @@ function MultiRoomEngine({ roomId }) {
     }
   };
 
-  const submitQuiz = () => {
+  const submitQuiz = async () => {
     if (confirm("Submit quiz? Your score will be locked on the multiplayer board.")) {
       setRoomState('finished');
+      if (isHost) {
+        // Clean up the room from the DB entirely when the host ends the match
+        await supabase.from('active_arenas').delete().eq('room_id', roomId);
+      }
       if (document.fullscreenElement) document.exitFullscreen();
     }
   };

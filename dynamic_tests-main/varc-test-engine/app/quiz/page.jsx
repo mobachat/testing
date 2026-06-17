@@ -13,6 +13,7 @@ export default function QuizLobby() {
   const [ipAddress, setIpAddress] = useState("");
   const [activeRooms, setActiveRooms] = useState([]);
   const [isFetchingIp, setIsFetchingIp] = useState(true);
+  const [isCreating, setIsCreating] = useState(false);
 
   // Host Configuration Modal State
   const [showConfig, setShowConfig] = useState(false);
@@ -37,30 +38,29 @@ export default function QuizLobby() {
       });
   }, []);
 
-  // Fetch available test modules for the selector
+  // Fetch available test modules
   useEffect(() => {
     getAvailableTests().then(setAvailableTests);
   }, []);
 
-  // Listen to Global Directory of Rooms
+  // Fetch Initial Rooms & Subscribe to DB Changes
   useEffect(() => {
-    const channel = supabase.channel('global-directory');
-    
-    channel.on('presence', { event: 'sync' }, () => {
-      const state = channel.presenceState();
-      const rooms = [];
-      for (const id in state) {
-        const presenceData = state[id][0];
-        if (presenceData && presenceData.isHost) {
-           rooms.push(presenceData);
-        }
-      }
-      setActiveRooms(rooms);
-    }).subscribe();
+    const fetchRooms = async () => {
+      const { data } = await supabase.from('active_arenas').select('*').eq('status', 'waiting');
+      if (data) setActiveRooms(data);
+    };
+    fetchRooms();
+
+    // Listen for new hosts creating rooms in the DB
+    const subscription = supabase
+      .channel('public:active_arenas')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'active_arenas' }, (payload) => {
+         fetchRooms(); // Refresh the list if any room is created, updated, or deleted
+      })
+      .subscribe();
 
     return () => {
-       // Safe, standard cleanup. Destroys the local channel listener cleanly.
-       supabase.removeChannel(channel);
+       supabase.removeChannel(subscription);
     };
   }, []);
 
@@ -69,18 +69,37 @@ export default function QuizLobby() {
     setShowConfig(true);
   };
 
-  const handleLaunchServer = () => {
+  const handleLaunchServer = async () => {
+    setIsCreating(true);
     const sanitizedName = hostName.trim().replace(/[^a-zA-Z0-9]/g, '');
     const sanitizedIp = ipAddress.replace(/[^a-zA-Z0-9]/g, '-');
     const roomId = `${sanitizedName}-${sanitizedIp}`.toUpperCase();
     
-    sessionStorage.setItem(`arena_config_${roomId}`, JSON.stringify({
+    const config = {
         mode: quizMode,
         count: questionCount,
         tests: selectedTests,
         enableMic: enableMic
-    }));
+    };
 
+    // 1. Write the room to the Database
+    const { error } = await supabase.from('active_arenas').upsert({
+        room_id: roomId,
+        host_name: hostName.trim(),
+        ip: ipAddress,
+        config: config,
+        status: 'waiting'
+    });
+
+    if (error) {
+       console.error("DB Error:", error);
+       alert("Failed to broadcast room to directory. Please try again.");
+       setIsCreating(false);
+       return;
+    }
+
+    // 2. Keep local session for Host Authentication on the next page
+    sessionStorage.setItem(`arena_config_${roomId}`, JSON.stringify(config));
     router.push(`/quiz/multi/${roomId}`);
   };
 
@@ -219,10 +238,10 @@ export default function QuizLobby() {
                </div>
                <button 
                   onClick={handleLaunchServer}
-                  disabled={quizMode === 'custom' && selectedTests.length === 0}
+                  disabled={isCreating || (quizMode === 'custom' && selectedTests.length === 0)}
                   className="bg-indigo-600 text-white font-bold px-8 py-3 rounded-xl shadow-md hover:bg-indigo-500 hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                >
-                  Launch Server <Play size={16} fill="currentColor"/>
+                  {isCreating ? <Loader2 size={16} className="animate-spin" /> : "Launch Server"} <Play size={16} fill="currentColor"/>
                </button>
             </div>
           </div>
@@ -296,20 +315,20 @@ export default function QuizLobby() {
                </div>
              ) : (
                activeRooms.map((room, idx) => (
-                 <div key={room.roomId || idx} className="bg-white border border-slate-200 p-5 rounded-2xl flex items-center justify-between shadow-sm hover:shadow-md hover:border-indigo-200 transition-all group">
+                 <div key={room.room_id || idx} className="bg-white border border-slate-200 p-5 rounded-2xl flex items-center justify-between shadow-sm hover:shadow-md hover:border-indigo-200 transition-all group">
                    <div className="flex items-center gap-4">
                      <div className="bg-indigo-50 p-3 rounded-xl text-indigo-500 group-hover:bg-indigo-500 group-hover:text-white transition-colors">
                        <Server size={24} />
                      </div>
                      <div>
                        <h3 className="font-extrabold text-slate-800 text-lg flex items-center gap-2">
-                         {room.hostName}'s Arena
+                         {room.host_name}'s Arena
                        </h3>
                        <p className="text-xs font-mono text-slate-400 mt-1">Host IP: {room.ip}</p>
                      </div>
                    </div>
                    <button 
-                      onClick={() => handleJoinMulti(room.roomId)}
+                      onClick={() => handleJoinMulti(room.room_id)}
                      className="bg-slate-900 text-white font-bold px-6 py-3 rounded-xl hover:bg-indigo-600 transition-colors flex items-center gap-2 shadow-sm"
                    >
                      Join <Play size={16} fill="currentColor"/>
