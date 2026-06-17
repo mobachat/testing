@@ -4,14 +4,14 @@ import { useEffect, useState, useRef, useMemo, Suspense } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '../../../../lib/supabaseClient';
 import { generateRandomQuiz } from '../../../../lib/quizGenerator';
-import { getAvailableTests, getTestData } from '../../../../lib/githubFetcher';
+import { getTestData } from '../../../../lib/githubFetcher';
 import TestPassage from '../../../../components/TestPassage';
 import TestSelector from '../../../../components/TestSelector';
-import { Users, Copy, Home, Loader2, Star, Trophy, Activity, Medal, Target, ChevronRight, Play } from 'lucide-react';
+import { Users, Copy, Home, Loader2, Star, Trophy, Activity, Medal, Target, ChevronRight, Play, Mic } from 'lucide-react';
 
 function MultiRoomEngine({ roomId }) {
   const router = useRouter();
-  // Unique identifiers
+  
   const myUuid = useMemo(() => Math.random().toString(36).substring(2, 15), []);
   const myAvatarName = useMemo(() => `Player_${Math.floor(Math.random() * 1000)}`, []);
   
@@ -25,12 +25,12 @@ function MultiRoomEngine({ roomId }) {
   const [myAnswers, setMyAnswers] = useState({});
   const [myLocked, setMyLocked] = useState({});
   
-  // Distributed state via Supabase Presence (highly scalable)
   const [leaderboard, setLeaderboard] = useState([]); 
   const channelRef = useRef(null);
 
-  const [availableTests, setAvailableTests] = useState([]);
-  const [selectedTests, setSelectedTests] = useState([]);
+  // Configuration passed down from the Host's Modal
+  const [quizConfig, setQuizConfig] = useState(null); // The host's original config
+  const [peerConfig, setPeerConfig] = useState(null); // The configuration received via broadcast for players
   const [isStarting, setIsStarting] = useState(false);
 
   const extractQuestionsFromRow = (row) => {
@@ -75,22 +75,19 @@ function MultiRoomEngine({ roomId }) {
     const channel = supabase.channel(`multi-${roomId}`, { config: { presence: { key: myUuid } } });
     channelRef.current = channel;
 
-    // Presence efficiently handles 100+ concurrent connections without manual broadcasting
     channel.on('presence', { event: 'sync' }, () => {
       if (!isMounted) return;
       const state = channel.presenceState();
       const userIds = Object.keys(state).sort(); 
       setPeers(userIds);
       
-      // Automatic Host Election: Oldest UUID is responsible for data payload
       if (userIds.length > 0 && userIds[0] === myUuid) {
         setIsHost(true);
       }
 
-      // Build Leaderboard from Presence State
       const currentLeaderboard = [];
       Object.entries(state).forEach(([uuid, presences]) => {
-        const latestPresence = presences[presences.length - 1]; // Get most recent state
+        const latestPresence = presences[presences.length - 1]; 
         currentLeaderboard.push({
           id: uuid,
           name: latestPresence.name || 'Unknown',
@@ -100,7 +97,6 @@ function MultiRoomEngine({ roomId }) {
         });
       });
       
-      // Sort by correct answers, then by highest attempted
       currentLeaderboard.sort((a, b) => b.correct - a.correct || b.totalChecked - a.totalChecked);
       setLeaderboard(currentLeaderboard);
     });
@@ -109,21 +105,20 @@ function MultiRoomEngine({ roomId }) {
       if (!isMounted) return;
       if (payload.quizData && quizData.length === 0) {
         setQuizData(payload.quizData);
+        if (payload.config) setPeerConfig(payload.config);
         setRoomState('playing');
       }
     });
 
     channel.on('broadcast', { event: 'request_quiz' }, () => {
-      // If someone new asks for the quiz, only the Host responds to save bandwidth
       if (isHost && quizData.length > 0) {
-        channel.send({ type: 'broadcast', event: 'sync_state', payload: { quizData } });
+        channel.send({ type: 'broadcast', event: 'sync_state', payload: { quizData, config: quizConfig } });
       }
     });
 
     channel.subscribe(async (status) => {
       if (status === 'SUBSCRIBED') {
          await channel.track({ online_at: new Date().toISOString(), name: myAvatarName, correct: 0, totalChecked: 0 });
-         // Immediately request quiz data if we are late to the party
          if (quizData.length === 0) {
              channel.send({ type: 'broadcast', event: 'request_quiz' });
          }
@@ -134,49 +129,63 @@ function MultiRoomEngine({ roomId }) {
       isMounted = false;
       channel.unsubscribe();
     };
-  }, [roomId, myUuid, myAvatarName, quizData, isHost]);
+  }, [roomId, myUuid, myAvatarName, quizData, isHost, quizConfig]);
 
-  // Fetch available tests when user becomes host
+  // Read config from sessionStorage for Host
   useEffect(() => {
-    if (isHost) {
-      getAvailableTests().then(tests => setAvailableTests(tests));
+    if (isHost && !quizConfig) {
+      const configStr = sessionStorage.getItem(`arena_config_${roomId}`);
+      if (configStr) {
+         setQuizConfig(JSON.parse(configStr));
+      }
     }
-  }, [isHost]);
+  }, [isHost, roomId, quizConfig]);
 
-  const startQuiz = async () => {
+  // Handle Live Classroom Microphone Request for players upon entering 'playing' state
+  useEffect(() => {
+    if (roomState === 'playing' && peerConfig?.enableMic && !isHost) {
+      navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(stream => {
+           // Success: Granted mic access. Stream is ready for upcoming WebRTC feature connection
+           console.log("Mic access granted for live classroom.");
+        })
+        .catch(err => {
+           alert("Microphone access is required for this live classroom arena. Please enable it in your browser settings.");
+        });
+    }
+  }, [roomState, peerConfig, isHost]);
+
+  const beginQuiz = async () => {
+      if (!quizConfig) return;
       setIsStarting(true);
       let data = [];
-      if (selectedTests.length === 0) {
-          data = await generateRandomQuiz(5);
+      if (quizConfig.mode === 'random' || quizConfig.tests.length === 0) {
+          data = await generateRandomQuiz(quizConfig.count);
       } else {
-          for (const t of selectedTests) {
+          for (const t of quizConfig.tests) {
               const tData = await getTestData(t.filename);
               if (tData) data = data.concat(tData);
           }
       }
       setQuizData(data);
+      setPeerConfig(quizConfig);
       setRoomState('playing');
       if (channelRef.current) {
-          channelRef.current.send({ type: 'broadcast', event: 'sync_state', payload: { quizData: data } });
+          channelRef.current.send({ type: 'broadcast', event: 'sync_state', payload: { quizData: data, config: quizConfig } });
       }
       setIsStarting(false);
   };
 
-  // --- NEW: Global Directory Broadcasting ---
   // Keeps the room listed in the lobby as long as we are waiting for players
   useEffect(() => {
     let globalChannel;
-    
     if (isHost && roomState === 'waiting') {
       globalChannel = supabase.channel('global-directory');
-      
       globalChannel.subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
-          // Reconstruct Name and IP from the URL roomId (e.g., JOHNDOE-192-168-1-5)
           const parts = roomId.split('-');
           const hostName = parts[0] || 'Arena Host';
           const ip = parts.slice(1).join('.') || 'Active Network';
-
           await globalChannel.track({
             isHost: true,
             hostName: hostName,
@@ -187,20 +196,16 @@ function MultiRoomEngine({ roomId }) {
         }
       });
     }
-
-    // Cleanup: Remove room from lobby when the game starts, or the host leaves
     return () => {
       if (globalChannel) {
         supabase.removeChannel(globalChannel);
       }
     };
   }, [isHost, roomState, roomId]);
-  // ------------------------------------------
 
   const handlePersistProgress = async (newAnswers, newLocked) => {
     const stats = computeLiveStats(newAnswers || myAnswers, newLocked || myLocked, quizData);
     if (channelRef.current) {
-       // Using track() means Supabase handles the efficient distribution to all 100+ peers
       await channelRef.current.track({
         online_at: new Date().toISOString(),
         name: myAvatarName,
@@ -222,7 +227,6 @@ function MultiRoomEngine({ roomId }) {
   if (roomState === 'waiting') {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-indigo-50 via-white to-purple-50 flex-col gap-6 text-center px-4 relative overflow-hidden">
-        {/* Abstract Background Elements */}
         <div className="absolute top-[-10%] left-[-10%] w-96 h-96 bg-purple-300 rounded-full mix-blend-multiply filter blur-3xl opacity-30 animate-blob"></div>
         <div className="absolute top-[20%] right-[-10%] w-96 h-96 bg-indigo-300 rounded-full mix-blend-multiply filter blur-3xl opacity-30 animate-blob animation-delay-2000"></div>
         
@@ -255,34 +259,33 @@ function MultiRoomEngine({ roomId }) {
           </div>
 
           {isHost ? (
-            <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 mb-6 text-left">
-              <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Select Quiz Datasets</div>
-              <div className="max-h-48 overflow-y-auto border border-slate-200 bg-white rounded-lg p-2 mb-4 scrollbar-thin">
-                {availableTests.length === 0 ? (
-                  <div className="flex justify-center p-4"><Loader2 size={16} className="animate-spin text-indigo-500"/></div>
-                ) : (
-                  availableTests.map((t, i) => (
-                    <label key={i} className="flex items-center gap-3 p-2 hover:bg-slate-50 cursor-pointer border-b border-slate-50 last:border-0 transition-colors">
-                      <input 
-                        type="checkbox" 
-                        className="w-4 h-4 text-indigo-600 rounded border-gray-300 focus:ring-indigo-500"
-                        onChange={(e) => {
-                         if (e.target.checked) setSelectedTests([...selectedTests, t]);
-                         else setSelectedTests(selectedTests.filter(st => st.filename !== t.filename));
-                      }} />
-                      <span className="text-sm font-medium text-slate-700 truncate">{t.name} <span className="text-[10px] text-slate-400 uppercase bg-slate-100 px-1.5 py-0.5 rounded ml-1">{t.folder}</span></span>
-                    </label>
-                  ))
-                )}
-              </div>
-              <button 
-                onClick={startQuiz} 
-                disabled={isStarting || availableTests.length === 0} 
-                className="w-full bg-indigo-600 text-white font-bold py-3 rounded-xl hover:bg-indigo-700 transition shadow-md disabled:opacity-50 disabled:cursor-not-allowed flex justify-center items-center gap-2"
-              >
-                {isStarting ? <Loader2 size={18} className="animate-spin" /> : <Play size={18} />}
-                {selectedTests.length === 0 ? 'Start with Random 5' : `Start Arena (${selectedTests.length} selected)`}
-              </button>
+            <div className="bg-slate-50 border border-slate-100 rounded-xl p-6 mb-6 text-left shadow-inner animate-in fade-in zoom-in duration-300">
+               <h3 className="font-extrabold text-slate-800 text-lg mb-2">Arena Ready</h3>
+               <p className="text-sm text-slate-500 mb-6 leading-relaxed">You have pre-configured this arena. Wait for peers to join, then broadcast the data.</p>
+               
+               {quizConfig && (
+                 <div className="flex gap-4 mb-6">
+                   <div className="flex-1 bg-white border border-slate-200 rounded-lg p-3 shadow-sm">
+                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Mode</div>
+                     <div className="text-sm font-bold text-slate-700 capitalize">{quizConfig.mode} ({quizConfig.mode === 'random' ? quizConfig.count : quizConfig.tests.length} items)</div>
+                   </div>
+                   <div className="flex-1 bg-white border border-slate-200 rounded-lg p-3 shadow-sm">
+                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Live Audio</div>
+                     <div className="text-sm font-bold text-slate-700 flex items-center gap-1">
+                       {quizConfig.enableMic ? <><Mic size={14} className="text-emerald-500"/> Enabled</> : 'Disabled'}
+                     </div>
+                   </div>
+                 </div>
+               )}
+
+               <button 
+                 onClick={beginQuiz} 
+                 disabled={isStarting || !quizConfig} 
+                 className="w-full bg-indigo-600 text-white font-bold py-4 rounded-xl hover:bg-indigo-700 transition shadow-md disabled:opacity-50 disabled:cursor-not-allowed flex justify-center items-center gap-2"
+               >
+                 {isStarting ? <Loader2 size={18} className="animate-spin" /> : <Play size={18} />}
+                 Begin Quiz Now
+               </button>
             </div>
           ) : (
              <div className="bg-indigo-50 border border-indigo-100 text-indigo-700 text-sm font-bold p-4 rounded-xl mb-6 flex items-center justify-center gap-2 animate-pulse">
@@ -335,13 +338,10 @@ function MultiRoomEngine({ roomId }) {
     );
   }
 
-  // Active Game State
   const myStats = computeLiveStats(myAnswers, myLocked, quizData);
 
   return (
     <div className="flex h-screen w-full bg-slate-50 overflow-hidden font-sans">
-      
-      {/* Main Testing Area */}
       <main className="flex-1 relative overflow-y-auto pr-0 lg:pr-[320px] transition-all">
         {viewState === 'selector' ? (
           <TestSelector 
@@ -352,7 +352,7 @@ function MultiRoomEngine({ roomId }) {
             setCurrentIndex={setCurrentIndex} 
           />
         ) : (
-          <div className="pb-24 lg:pb-0"> {/* padding for mobile leaderboard */}
+          <div className="pb-24 lg:pb-0">
             <TestPassage 
               data={quizData} 
               testId={`Arena-${roomId}`}
@@ -372,7 +372,6 @@ function MultiRoomEngine({ roomId }) {
         )}
       </main>
 
-      {/* Comprehensive Non-Blocking Leaderboard Sidebar */}
       <aside className="hidden lg:flex fixed top-0 right-0 h-screen w-[320px] bg-white border-l border-slate-200 shadow-2xl flex-col z-40">
          <div className="p-6 border-b border-slate-100 bg-slate-50/50">
             <div className="flex items-center gap-3 mb-1">
@@ -398,7 +397,6 @@ function MultiRoomEngine({ roomId }) {
                         {player.correct} pts
                       </span>
                    </div>
-                   {/* Progress Indicator */}
                    <div className="w-full bg-slate-100 rounded-full h-2 mb-1 overflow-hidden">
                      <div 
                        className={`h-2 rounded-full transition-all duration-500 ${player.isMe ? 'bg-indigo-500' : 'bg-slate-400'}`} 
@@ -420,7 +418,6 @@ function MultiRoomEngine({ roomId }) {
          </div>
       </aside>
 
-      {/* Mobile Sticky Top Ribbon */}
       <div className="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 shadow-[0_-10px_40px_rgba(0,0,0,0.1)] z-50 p-3 flex items-center justify-between">
          <div className="flex items-center gap-2">
             <div className="bg-indigo-100 p-2 rounded-lg"><Trophy size={18} className="text-indigo-600"/></div>
