@@ -68,6 +68,7 @@ function MultiRoomEngine({ roomId }) {
     return { correct, totalChecked };
   };
 
+  // 1. Host Authentication
   useEffect(() => {
     let isMounted = true;
     const configStr = sessionStorage.getItem(`arena_config_${roomId}`);
@@ -82,6 +83,7 @@ function MultiRoomEngine({ roomId }) {
     return () => { isMounted = false; };
   }, [roomId]);
 
+  // 2. Realtime Synchronization
   useEffect(() => {
     let isMounted = true;
     const channel = supabase.channel(`multi-${roomId}`, { config: { presence: { key: myUuid } } });
@@ -146,6 +148,7 @@ function MultiRoomEngine({ roomId }) {
     };
   }, [roomId, myUuid, myAvatarName, quizData, isHost, quizConfig]);
 
+  // Handle Live Classroom Microphone Request for players upon entering 'playing' state
   useEffect(() => {
     if (roomState === 'playing' && peerConfig?.enableMic && !isHost) {
       navigator.mediaDevices.getUserMedia({ audio: true })
@@ -179,36 +182,38 @@ function MultiRoomEngine({ roomId }) {
       setIsStarting(false);
   };
 
+  // 3. Global Directory Broadcasting (Keeps the room listed in the lobby for others)
   useEffect(() => {
-    let globalChannel;
-    // We add a tiny 50ms delay to ensure the Lobby's unsubscribe resolves before the Room binds to it.
-    const timer = setTimeout(() => {
-      if (isHost && roomState === 'waiting') {
-        // FIX: By supplying a custom presence key, we isolate the Host's directory signal from any other listeners
-        globalChannel = supabase.channel('global-directory', { config: { presence: { key: `host-${roomId}` } } });
-        globalChannel.subscribe(async (status) => {
-          if (status === 'SUBSCRIBED') {
-            const parts = roomId.split('-');
-            const hostName = parts[0] || 'Arena Host';
-            const ip = parts.slice(1).join('.') || 'Active Network';
-            await globalChannel.track({
-              isHost: true,
-              hostName: hostName,
-              ip: ip,
-              roomId: roomId,
-              createdAt: new Date().toISOString()
-            });
-          }
-        });
-      }
-    }, 50);
+    let isMounted = true;
+
+    if (isHost && roomState === 'waiting') {
+      const globalChannel = supabase.channel('global-directory');
+      
+      globalChannel.subscribe(async (status) => {
+        if (status === 'SUBSCRIBED' && isMounted) {
+          const parts = roomId.split('-');
+          const hostName = parts[0] || 'Arena Host';
+          const ip = parts.slice(1).join('.') || 'Active Network';
+          
+          await globalChannel.track({
+            isHost: true,
+            hostName: hostName,
+            ip: ip,
+            roomId: roomId,
+            createdAt: new Date().toISOString()
+          });
+        }
+      });
+    }
 
     return () => {
-      clearTimeout(timer);
-      if (globalChannel) {
-        globalChannel.untrack(); 
-        globalChannel.unsubscribe(); // FIX: Never use removeChannel here.
-      }
+      isMounted = false;
+      // CRITICAL ARCHITECTURE FIX: 
+      // We ONLY untrack our room presence from the lobby so it disappears from the list.
+      // We NEVER call unsubscribe() or removeChannel() here, preserving the shared 
+      // socket connection for the rest of the app.
+      const globalChannel = supabase.channel('global-directory');
+      globalChannel.untrack();
     };
   }, [isHost, roomState, roomId]);
 

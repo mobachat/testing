@@ -46,6 +46,9 @@ export default function QuizLobby() {
   useEffect(() => {
     const channel = supabase.channel('global-directory');
     
+    // Clear any existing listeners to prevent strict-mode duplicates
+    channel.removeAllListeners();
+    
     channel.on('presence', { event: 'sync' }, () => {
       const state = channel.presenceState();
       const rooms = [];
@@ -59,8 +62,11 @@ export default function QuizLobby() {
     }).subscribe();
 
     return () => {
-       // FIX: Use unsubscribe instead of removeChannel to prevent killing the host's connection during transition
-       channel.unsubscribe();
+       // CRITICAL ARCHITECTURE FIX: 
+       // We DO NOT call unsubscribe() or removeChannel() here. 
+       // If we do, the Lobby will murder the socket during the route transition, 
+       // leaving the Room disconnected. We just remove the UI listeners.
+       channel.removeAllListeners();
     };
   }, []);
 
