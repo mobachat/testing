@@ -15,7 +15,6 @@ function MultiRoomEngine({ roomId }) {
   const myUuid = useMemo(() => Math.random().toString(36).substring(2, 15), []);
   const myAvatarName = useMemo(() => `Player_${Math.floor(Math.random() * 1000)}`, []);
   
-  const [peers, setPeers] = useState([]);
   const [isHost, setIsHost] = useState(false);
   const [quizData, setQuizData] = useState([]);
   const [roomState, setRoomState] = useState('waiting');
@@ -70,6 +69,22 @@ function MultiRoomEngine({ roomId }) {
     return { correct, totalChecked };
   };
 
+  // 1. Host Authentication: Securely verify if this browser created the room
+  useEffect(() => {
+    let isMounted = true;
+    const configStr = sessionStorage.getItem(`arena_config_${roomId}`);
+    if (configStr && isMounted) {
+      setIsHost(true);
+      try {
+        setQuizConfig(JSON.parse(configStr));
+      } catch (error) {
+        setQuizConfig({ mode: 'random', count: 5, tests: [], enableMic: true });
+      }
+    }
+    return () => { isMounted = false; };
+  }, [roomId]);
+
+  // 2. Realtime Synchronization
   useEffect(() => {
     let isMounted = true;
     const channel = supabase.channel(`multi-${roomId}`, { config: { presence: { key: myUuid } } });
@@ -78,12 +93,6 @@ function MultiRoomEngine({ roomId }) {
     channel.on('presence', { event: 'sync' }, () => {
       if (!isMounted) return;
       const state = channel.presenceState();
-      const userIds = Object.keys(state).sort(); 
-      setPeers(userIds);
-      
-      if (userIds.length > 0 && userIds[0] === myUuid) {
-        setIsHost(true);
-      }
 
       const currentLeaderboard = [];
       Object.entries(state).forEach(([uuid, presences]) => {
@@ -93,7 +102,8 @@ function MultiRoomEngine({ roomId }) {
           name: latestPresence.name || 'Unknown',
           correct: latestPresence.correct || 0,
           totalChecked: latestPresence.totalChecked || 0,
-          isMe: uuid === myUuid
+          isMe: uuid === myUuid,
+          isHost: latestPresence.isHost || false
         });
       });
       
@@ -118,8 +128,18 @@ function MultiRoomEngine({ roomId }) {
 
     channel.subscribe(async (status) => {
       if (status === 'SUBSCRIBED') {
-         await channel.track({ online_at: new Date().toISOString(), name: myAvatarName, correct: 0, totalChecked: 0 });
-         if (quizData.length === 0) {
+         // Dynamically grab true host status to prevent closure staleness on mount
+         const isActuallyHost = !!sessionStorage.getItem(`arena_config_${roomId}`);
+         await channel.track({ 
+             online_at: new Date().toISOString(), 
+             name: isActuallyHost ? 'Quiz Master' : myAvatarName, 
+             correct: 0, 
+             totalChecked: 0,
+             isHost: isActuallyHost
+         });
+
+         // Request the quiz payload from the host if we are just a joining player
+         if (!isActuallyHost && quizData.length === 0) {
              channel.send({ type: 'broadcast', event: 'request_quiz' });
          }
       }
@@ -130,23 +150,6 @@ function MultiRoomEngine({ roomId }) {
       channel.unsubscribe();
     };
   }, [roomId, myUuid, myAvatarName, quizData, isHost, quizConfig]);
-
-  // Read config from sessionStorage for Host with robust fallback
-  useEffect(() => {
-    if (isHost && !quizConfig) {
-      try {
-        const configStr = sessionStorage.getItem(`arena_config_${roomId}`);
-        if (configStr) {
-           setQuizConfig(JSON.parse(configStr));
-        } else {
-           // Fallback if sessionStorage is empty or dropped
-           setQuizConfig({ mode: 'random', count: 5, tests: [], enableMic: true });
-        }
-      } catch (error) {
-        setQuizConfig({ mode: 'random', count: 5, tests: [], enableMic: true });
-      }
-    }
-  }, [isHost, roomId, quizConfig]);
 
   // Handle Live Classroom Microphone Request for players upon entering 'playing' state
   useEffect(() => {
@@ -183,7 +186,7 @@ function MultiRoomEngine({ roomId }) {
       setIsStarting(false);
   };
 
-  // Keeps the room listed in the lobby as long as we are waiting for players
+  // 3. Global Directory Broadcasting (Keeps the room listed in the lobby for others)
   useEffect(() => {
     let globalChannel;
     if (isHost && roomState === 'waiting') {
@@ -215,9 +218,10 @@ function MultiRoomEngine({ roomId }) {
     if (channelRef.current) {
       await channelRef.current.track({
         online_at: new Date().toISOString(),
-        name: myAvatarName,
+        name: isHost ? 'Quiz Master' : myAvatarName,
         correct: stats.correct,
-        totalChecked: stats.totalChecked
+        totalChecked: stats.totalChecked,
+        isHost: isHost
       });
     }
   };
@@ -257,11 +261,15 @@ function MultiRoomEngine({ roomId }) {
           <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 mb-6 text-left">
             <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Connected Peers</div>
             <div className="flex flex-wrap gap-2">
-              {peers.map((p, i) => (
-                <div key={p} className="bg-white border border-slate-200 text-slate-600 text-xs font-semibold px-3 py-1 rounded-full shadow-sm">
-                  {p === myUuid ? 'You' : `Player ${i+1}`} {p === peers[0] && '(Host)'}
-                </div>
-              ))}
+              {leaderboard.length === 0 ? (
+                 <span className="text-xs font-medium text-slate-500">Establishing connection...</span>
+              ) : (
+                 leaderboard.map((p) => (
+                   <div key={p.id} className={`border text-xs font-semibold px-3 py-1 rounded-full shadow-sm ${p.isHost ? 'bg-indigo-100 border-indigo-300 text-indigo-800' : 'bg-white border-slate-200 text-slate-600'}`}>
+                     {p.name} {p.isMe && '(You)'} {p.isHost && '👑'}
+                   </div>
+                 ))
+              )}
             </div>
           </div>
 
@@ -324,7 +332,7 @@ function MultiRoomEngine({ roomId }) {
                      {idx + 1}
                    </div>
                    <span className={`font-bold ${player.isMe ? 'text-indigo-900' : 'text-slate-700'}`}>
-                     {player.name} {player.isMe && '(You)'}
+                     {player.name} {player.isMe && '(You)'} {player.isHost && '👑'}
                    </span>
                 </div>
                 <div className="text-right">
@@ -397,7 +405,7 @@ function MultiRoomEngine({ roomId }) {
                       <div className="flex items-center gap-2">
                         {idx === 0 && <Medal size={16} className="text-yellow-500"/>}
                         <span className={`font-bold text-sm ${player.isMe ? 'text-indigo-700' : 'text-slate-700'}`}>
-                          {player.name} {player.isMe && '(You)'}
+                          {player.name} {player.isMe && '(You)'} {player.isHost && '👑'}
                         </span>
                       </div>
                       <span className="bg-slate-100 text-slate-600 text-[10px] font-bold px-2 py-1 rounded-full">
@@ -429,7 +437,7 @@ function MultiRoomEngine({ roomId }) {
          <div className="flex items-center gap-2">
             <div className="bg-indigo-100 p-2 rounded-lg"><Trophy size={18} className="text-indigo-600"/></div>
             <div>
-              <div className="text-xs font-extrabold text-slate-800">Rank: #{leaderboard.findIndex(p => p.isMe) + 1} of {peers.length}</div>
+              <div className="text-xs font-extrabold text-slate-800">Rank: #{leaderboard.findIndex(p => p.isMe) + 1} of {leaderboard.length}</div>
               <div className="text-[10px] font-semibold text-slate-500">{myStats.correct} Correct / {myStats.totalChecked} Attempted</div>
             </div>
          </div>
