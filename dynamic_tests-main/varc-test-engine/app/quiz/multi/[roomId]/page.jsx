@@ -7,7 +7,7 @@ import { generateRandomQuiz } from '../../../../lib/quizGenerator';
 import { getTestData } from '../../../../lib/githubFetcher';
 import TestPassage from '../../../../components/TestPassage';
 import TestSelector from '../../../../components/TestSelector';
-import { Users, Copy, Home, Loader2, Star, Trophy, Activity, Medal, Target, ChevronRight, Play, Mic } from 'lucide-react';
+import { Users, Copy, Home, Loader2, Star, Trophy, Activity, Medal, Target, ChevronRight, Play, Mic, X } from 'lucide-react';
 
 function MultiRoomEngine({ roomId }) {
   const router = useRouter();
@@ -17,7 +17,7 @@ function MultiRoomEngine({ roomId }) {
   
   const [isHost, setIsHost] = useState(false);
   const [quizData, setQuizData] = useState([]);
-  const [roomState, setRoomState] = useState('waiting'); // 'waiting' | 'playing' | 'finished'
+  const [roomState, setRoomState] = useState('waiting');
   const [viewState, setViewState] = useState('testing');
   
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -30,6 +30,10 @@ function MultiRoomEngine({ roomId }) {
   const [quizConfig, setQuizConfig] = useState(null); 
   const [peerConfig, setPeerConfig] = useState(null); 
   const [isStarting, setIsStarting] = useState(false);
+  
+  // New Database Validation States
+  const [isDbLoading, setIsDbLoading] = useState(true);
+  const [dbError, setDbError] = useState(false);
 
   const extractQuestionsFromRow = (row) => {
     if (!row || row.length === 0) return [];
@@ -68,31 +72,40 @@ function MultiRoomEngine({ roomId }) {
     return { correct, totalChecked };
   };
 
-  // 1. Fetch Room Config from Database
+  // 1. Fetch Room Config from the active_arenas Database Table
   useEffect(() => {
     const fetchRoomDb = async () => {
-      const { data, error } = await supabase.from('active_arenas').select('*').eq('room_id', roomId).single();
+      const { data, error } = await supabase
+        .from('active_arenas')
+        .select('*')
+        .eq('room_id', roomId)
+        .single();
       
-      if (data) {
-        setPeerConfig(data.config);
-        
-        // Verify if we are the host using the local sessionStorage key
-        const localHostConfig = sessionStorage.getItem(`arena_config_${roomId}`);
-        if (localHostConfig) {
-           setIsHost(true);
-           setQuizConfig(data.config); // Set config for starting the game
-        }
-      } else {
-         console.warn("Room not found in DB or fetching failed.");
+      if (error || !data) {
+        console.error("Room fetch error:", error);
+        setDbError(true);
+        setIsDbLoading(false);
+        return;
       }
+
+      setPeerConfig(data.config);
+      
+      // Check local session to verify if this browser is the Host
+      const localHostConfig = sessionStorage.getItem(`arena_config_${roomId}`);
+      if (localHostConfig) {
+         setIsHost(true);
+         setQuizConfig(data.config); 
+      }
+      setIsDbLoading(false);
     };
     fetchRoomDb();
   }, [roomId]);
 
   // 2. Realtime Synchronization for Gameplay & Presence
   useEffect(() => {
+    if (isDbLoading || dbError) return;
+
     let isMounted = true;
-    // We strictly use this channel for in-game state, NOT directory listings
     const channel = supabase.channel(`multi-${roomId}`, { config: { presence: { key: myUuid } } });
     channelRef.current = channel;
 
@@ -150,7 +163,7 @@ function MultiRoomEngine({ roomId }) {
       isMounted = false;
       supabase.removeChannel(channel);
     };
-  }, [roomId, myUuid, myAvatarName, quizData, isHost]);
+  }, [roomId, myUuid, myAvatarName, quizData, isHost, isDbLoading, dbError]);
 
   // 3. Handle Live Classroom Microphone Request for players
   useEffect(() => {
@@ -180,10 +193,9 @@ function MultiRoomEngine({ roomId }) {
       setQuizData(data);
       setRoomState('playing');
 
-      // Tell DB the room is no longer 'waiting', so it vanishes from the Lobby
+      // Update DB to hide this room from the active lobby
       await supabase.from('active_arenas').update({ status: 'playing' }).eq('room_id', roomId);
 
-      // Broadcast data to connected peers
       if (channelRef.current) {
           channelRef.current.send({ type: 'broadcast', event: 'sync_state', payload: { quizData: data } });
       }
@@ -209,12 +221,35 @@ function MultiRoomEngine({ roomId }) {
       if (isHost) {
         // Clean up the room from the DB entirely when the host ends the match
         await supabase.from('active_arenas').delete().eq('room_id', roomId);
+        sessionStorage.removeItem(`arena_config_${roomId}`);
       }
       if (document.fullscreenElement) document.exitFullscreen();
     }
   };
 
   const totalQs = quizData.reduce((acc, curr) => acc + extractQuestionsFromRow(curr).length, 0);
+
+  // Loading & Error States
+  if (isDbLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <Loader2 className="animate-spin text-indigo-500" size={48} />
+      </div>
+    );
+  }
+
+  if (dbError) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 flex-col gap-4">
+         <div className="bg-rose-100 p-5 rounded-full text-rose-500 shadow-sm"><X size={48}/></div>
+         <h2 className="text-3xl font-extrabold text-slate-800 tracking-tight">Arena Not Found</h2>
+         <p className="text-slate-500 font-medium text-center max-w-sm">This room does not exist, the host may have cancelled it, or the match has already concluded.</p>
+         <button onClick={() => router.push('/quiz')} className="mt-4 px-8 py-3 bg-slate-900 hover:bg-indigo-600 text-white rounded-xl font-bold transition-colors shadow-md flex items-center gap-2">
+            <Home size={18} /> Return to Directory
+         </button>
+      </div>
+    );
+  }
 
   if (roomState === 'waiting') {
     return (
