@@ -27,7 +27,6 @@ function MultiRoomEngine({ roomId }) {
   const [leaderboard, setLeaderboard] = useState([]); 
   const channelRef = useRef(null);
 
-  // Configuration passed down from the Host's Modal
   const [quizConfig, setQuizConfig] = useState(null); 
   const [peerConfig, setPeerConfig] = useState(null); 
   const [isStarting, setIsStarting] = useState(false);
@@ -157,7 +156,6 @@ function MultiRoomEngine({ roomId }) {
       navigator.mediaDevices.getUserMedia({ audio: true })
         .then(stream => {
            console.log("Mic access granted for live classroom.");
-           // Stream is ready for upcoming WebRTC implementation
         })
         .catch(err => {
            alert("Microphone access is required for this live classroom arena. Please enable it in your browser settings.");
@@ -208,6 +206,7 @@ function MultiRoomEngine({ roomId }) {
     }
     return () => {
       if (globalChannel) {
+        globalChannel.untrack(); // explicitly untrack
         supabase.removeChannel(globalChannel);
       }
     };
